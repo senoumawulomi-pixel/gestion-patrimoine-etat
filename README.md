@@ -1,6 +1,6 @@
 # SIGPE – Système Intégré de Gestion du Patrimoine de l'État
 
-Plateforme de gestion du patrimoine de l'État en **architecture micro-services** (Laravel 11, PostgreSQL 16, Docker).
+Plateforme de gestion du patrimoine de l'État en **architecture micro-services** (Laravel 12, PostgreSQL 16, Docker).
 Projet individuel – Brief « Développement d'une solution numérique (Gestion du patrimoine) » – 10 au 15/11/2026.
 
 ## Sommaire
@@ -11,16 +11,18 @@ Projet individuel – Brief « Développement d'une solution numérique (Gestion
 
 **Solution** : un inventaire centralisé, des mouvements tracés (transfert, maintenance, cession, réforme), un calcul automatique de la valeur nette comptable et un tableau de bord de pilotage, le tout protégé par des rôles.
 
-Le dossier complet (analyse du besoin, cahier de design Figma, fiche technique, proposition financière, guide d'utilisation, plan de soutenance) accompagne ce dépôt.
+Les livrables académiques détaillés (maquettes Figma, fiche technique, proposition financière et guide utilisateur) sont à fournir séparément; ils ne sont pas inclus dans ce dépôt de code.
 
 ## 2. Fonctionnalités
-- Authentification et rôles : `admin`, `gestionnaire`, `auditeur`
-- CRUD des biens, recherche texte, filtres catégorie/statut, pagination
+- Authentification et rôles : `admin_central`, `admin`, `gestionnaire`, `auditeur`
+- Espaces séparés pour l'administration centrale, les ministères, les régions et les communes
+- CRUD des biens, recherche texte, filtres catégorie/type/statut/espace, pagination
 - Transferts d'affectation, maintenance, cession, réforme, avec historique par bien
 - Valeur nette comptable (amortissement linéaire, calculée à la volée)
+- Registre privé de suivi des actifs financiers et dettes (sans comptabilité générale)
 - Tableau de bord : totaux, répartition par catégorie, biens à réformer
 - Export CSV de l'inventaire
-- Accueil public et consultation en lecture seule des biens, sans connexion
+- Accueil public sans connexion : fiches publiées de patrimoines naturels et vivants avec des champs limités
 - Passerelle API (`/gateway/{service}/...`)
 
 ## 3. Architecture
@@ -33,7 +35,7 @@ Le dossier complet (analyse du besoin, cahier de design Figma, fiche technique, 
 | `mouvement` | Mouvements et historique | 8003 | `mouvement_db` |
 | `postgres` | Une instance, 3 bases | 5432 | – |
 
-Principes : une base par service ; aucune jointure inter-services ; le service Mouvements modifie un bien **uniquement via l'API du service Patrimoine** ; chaque service valide le jeton en appelant `GET /api/me` du service Auth.
+Principes : une base par service ; aucune jointure inter-services ; le service Mouvements modifie un bien **uniquement via l'API du service Patrimoine** ; chaque service valide le jeton en appelant `GET /api/me` du service Auth. Les UUID d'organisation dans Patrimoine et Mouvements sont des références logiques entre bases.
 
 ```mermaid
 flowchart LR
@@ -71,20 +73,26 @@ flowchart LR
 ### Diagramme de classes
 ```mermaid
 classDiagram
-  class User { +id +name +email +password +role +api_token }
+  class Organisation { +id +nom +code +type +parent_id }
+  class User { +id +name +email +password +role +api_token +organisation_id }
   class Categorie { +id +nom }
   class Bien {
     +id +code +designation +categorie_id
     +localisation +service_affecte
     +etat +statut
     +date_acquisition +valeur_acquisition +duree_amortissement
-    +valeurNette() float
+    +type_patrimoine +est_public +organisation_id
+    +valeurNette() float?
   }
   class Mouvement {
-    +id +bien_id +type
+    +id +bien_id +organisation_id +type
     +depuis_service +vers_service
     +description +cout +date_mouvement +user_name
   }
+  class EngagementFinancier { +id +organisation_id +code +nature +designation +contrepartie +montant_initial +solde_courant }
+  Organisation "1" --> "0..*" User : rattache
+  Organisation "1" --> "0..*" Bien : possède
+  Organisation "1" --> "0..*" EngagementFinancier : possède
   Categorie "1" --> "0..*" Bien : regroupe
   Bien "1" .. "0..*" Mouvement : référence logique
 ```
@@ -127,17 +135,21 @@ flowchart TB
 
 ## 5. Base de données et normalisation
 ```
-auth_db       users(id, name, email UNIQUE, password, role, api_token UNIQUE, timestamps)
+auth_db       organisations(id, nom, code UNIQUE, type, parent_id)
+              users(id, name, email UNIQUE, password, role, api_token UNIQUE, organisation_id, timestamps)
 patrimoine_db categories(id, nom UNIQUE)
-              biens(id, code UNIQUE, designation, categorie_id FK, localisation, service_affecte,
-                    etat, statut, date_acquisition, valeur_acquisition, duree_amortissement, timestamps)
-mouvement_db  mouvements(id, bien_id, type, depuis_service, vers_service, description,
+              biens(id, organisation_id, code, designation, type_patrimoine, est_public, categorie_id FK,
+                    localisation, service_affecte, etat, statut, date_acquisition, valeur_acquisition,
+                    duree_amortissement, zone_publique, description_publique, timestamps)
+              engagements_financiers(id, organisation_id, code, nature, designation, contrepartie,
+                    montant_initial, solde_courant, date_effet, date_echeance, statut, notes, timestamps)
+mouvement_db  mouvements(id, bien_id, organisation_id, type, depuis_service, vers_service, description,
                          cout, date_mouvement, user_name, timestamps)
 ```
 - **1FN** : valeurs atomiques, pas de groupes répétitifs.
 - **2FN** : clés simples (`id`), pas de dépendance partielle.
 - **3FN** : la catégorie est isolée ; la valeur nette est calculée, jamais stockée.
-- **Choix assumés** : `bien_id` (mouvements) est une référence logique entre bases ; `user_name` est une copie volontaire pour garder un historique d'audit lisible.
+- **Choix assumés** : le code d'un bien est unique par organisation ; `bien_id` des mouvements et `organisation_id` entre bases sont des références logiques ; `user_name` est une copie volontaire pour garder un historique d'audit lisible.
 
 ## 6. Installation
 Prérequis : Docker et Docker Compose.
@@ -149,26 +161,31 @@ Le premier démarrage est long (Laravel est téléchargé pour chaque service). 
 
 | Rôle | E-mail | Mot de passe |
 |---|---|---|
-| Administrateur | admin@etat.gov | Admin@123 |
+| Administrateur central | admin@etat.gov | Admin@123 |
 | Gestionnaire | gestionnaire@etat.gov | Gest@123 |
 | Auditeur | auditeur@etat.gov | Audit@123 |
 
 Changer ces mots de passe et les secrets PostgreSQL de `docker-compose.yml` avant toute mise en ligne.
 
 ## 7. Utilisation
-L'accueil public (`/`) permet de rechercher, filtrer et consulter les fiches des biens sans connexion. Pour accéder au tableau de bord, à l'export et aux fonctions de gestion, se connecter puis ouvrir l'inventaire. Les fiches publiques sont en lecture seule ; la modification et l'enregistrement de mouvements restent réservés aux rôles autorisés. Suppression réservée à l'administrateur.
+L'accueil public (`/`) permet de rechercher et consulter les fiches explicitement publiées des patrimoines naturels et vivants. Les autres biens et toutes les données financières restent privés. Les biens déjà recensés sont matériels et privés par défaut; le catalogue public reste donc vide jusqu'à publication d'une fiche naturelle ou vivante.
+
+L'administration centrale gère ses biens et ceux des ministères rattachés, crée les espaces ministériels, régionaux et communaux et peut y provisionner des comptes. Elle ne consulte pas les données des régions et communes autonomes. Un administrateur local gère les utilisateurs et les données de son seul espace. Les biens et mouvements déjà présents sont rattachés à l'administration centrale par les migrations.
 
 ## 8. API
-Les routes publiques de consultation du service Patrimoine ne demandent pas de jeton. Les autres routes API exigent `Authorization: Bearer <token>`.
+Seules les routes `GET /api/public/biens`, `GET /api/public/biens/{id}` et `GET /api/public/categories` du service Patrimoine sont publiques. Elles ne retournent que les champs autorisés des patrimoines naturels ou vivants explicitement publiés. Les autres routes API exigent `Authorization: Bearer <token>` et appliquent la portée de l'organisation.
 
 | Service | Méthode et route | Rôles |
 |---|---|---|
 | auth | `POST /api/login`, `POST /api/logout`, `GET /api/me` | tous |
-| auth | `GET/POST /api/users` | admin |
-| patrimoine | `GET /api/biens` (`q`, `categorie_id`, `statut`, `page`), `GET /api/biens/{id}`, `GET /api/categories` | public, lecture seule |
-| patrimoine | `GET /api/biens/stats`, `GET /api/biens/export` | tous les rôles authentifiés |
-| patrimoine | `POST /api/biens`, `PUT /api/biens/{id}`, `POST /api/categories` | admin, gestionnaire |
-| patrimoine | `DELETE /api/biens/{id}` | admin |
+| auth | `GET/POST /api/users` | admin central (provisionnement) ou admin local (son espace) |
+| auth | `GET /api/organisations` | admin central ou admin local (son espace) |
+| auth | `POST /api/organisations` | admin central |
+| patrimoine | `GET /api/public/biens`, `GET /api/public/biens/{id}`, `GET /api/public/categories` | public, champs limités |
+| patrimoine | `GET /api/biens` (`q`, `categorie_id`, `type_patrimoine`, `organisation_id`, `statut`, `page`), `GET /api/biens/{id}`, `GET /api/categories` | authentifiés, portée organisationnelle |
+| patrimoine | `GET /api/biens/stats`, `GET /api/biens/export`, `GET /api/engagements-financiers` | authentifiés, portée organisationnelle |
+| patrimoine | `POST/PUT /api/biens`, `POST/PUT /api/engagements-financiers` | admin central, admin d'espace, gestionnaire |
+| patrimoine | `DELETE /api/biens/{id}`, `DELETE /api/engagements-financiers/{id}` | admin central ou admin local |
 | mouvement | `GET /api/mouvements` (`bien_id`, `type`) | tous |
 | mouvement | `POST /api/mouvements` | admin, gestionnaire |
 
@@ -186,7 +203,7 @@ Mots de passe hachés (bcrypt), jetons hachés (SHA-256) en base, contrôle des 
 Les offres gratuites (Render, Koyeb, Fly.io, etc.) changent souvent : vérifier leurs limites actuelles. Démarche type : pousser le dépôt sur GitHub, créer une base PostgreSQL gratuite, créer un service par dossier `services/*` avec `docker/Dockerfile` (argument de build `SERVICE`), définir les variables `AUTH_URL`, `PATRIMOINE_URL`, `MOUVEMENT_URL`, `DB_*`, `RUN_MIGRATIONS` comme dans `docker-compose.yml`. Les offres gratuites mettent les services en veille : prévoir un temps de réveil, et garder la démonstration locale (`docker compose`) en secours pour l'oral.
 
 ## 11. Limites et évolutions
-Pas de tests automatisés ; pas d'import CSV ni de pièces jointes ; passerelle simple (à remplacer par Traefik ou Kong) ; cohérence entre services synchrone (évolution : événements et saga) ; gestion des utilisateurs disponible par l'API seulement.
+Pas de tests automatisés ; pas d'import CSV ni de pièces jointes ; passerelle simple (à remplacer par Traefik ou Kong) ; cohérence des mouvements entre services synchrone et non atomique (évolution : événements et saga). Le registre financier est un suivi simplifié et ne remplace pas un logiciel comptable.
 
 ## 12. Auteur
 Mawoulomi SENOU – développeur Full Stack Junior
