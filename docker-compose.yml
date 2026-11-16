@@ -1,0 +1,73 @@
+x-laravel: &laravel
+  restart: unless-stopped
+  environment: &env
+    APP_ENV: production
+    APP_DEBUG: "false"
+    SESSION_DRIVER: file
+    CACHE_STORE: file
+    QUEUE_CONNECTION: sync
+    DB_CONNECTION: pgsql
+    DB_HOST: postgres
+    DB_USERNAME: sigpe
+    DB_PASSWORD: sigpe_secret
+    AUTH_URL: http://auth:8000
+    PATRIMOINE_URL: http://patrimoine:8000
+    MOUVEMENT_URL: http://mouvement:8000
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: sigpe
+      POSTGRES_PASSWORD: sigpe_secret
+      POSTGRES_DB: postgres
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./docker/postgres/init.sql:/docker-entrypoint-initdb.d/init.sql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U sigpe -d postgres"]
+      interval: 5s
+      retries: 10
+
+  auth:
+    <<: *laravel
+    build: { context: ., dockerfile: docker/Dockerfile, args: { SERVICE: auth } }
+    environment:
+      <<: *env
+      DB_DATABASE: auth_db
+      RUN_MIGRATIONS: "1"
+    ports: ["8001:8000"]
+    depends_on: { postgres: { condition: service_healthy } }
+
+  patrimoine:
+    <<: *laravel
+    build: { context: ., dockerfile: docker/Dockerfile, args: { SERVICE: patrimoine } }
+    environment:
+      <<: *env
+      DB_DATABASE: patrimoine_db
+      RUN_MIGRATIONS: "1"
+    ports: ["8002:8000"]
+    depends_on: { postgres: { condition: service_healthy }, auth: { condition: service_started } }
+
+  mouvement:
+    <<: *laravel
+    build: { context: ., dockerfile: docker/Dockerfile, args: { SERVICE: mouvement } }
+    environment:
+      <<: *env
+      DB_DATABASE: mouvement_db
+      RUN_MIGRATIONS: "1"
+    ports: ["8003:8000"]
+    depends_on: { postgres: { condition: service_healthy }, auth: { condition: service_started } }
+
+  web:
+    <<: *laravel
+    build: { context: ., dockerfile: docker/Dockerfile, args: { SERVICE: web } }
+    environment:
+      <<: *env
+      RUN_MIGRATIONS: "0"
+    ports: ["8080:8000"]
+    depends_on: [auth, patrimoine, mouvement]
+
+volumes:
+  pgdata:
