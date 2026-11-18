@@ -8,6 +8,7 @@ WORKDIR /app
 ENV COMPOSER_ALLOW_SUPERUSER=1 COMPOSER_NO_SECURITY_BLOCKING=1
 RUN composer create-project laravel/laravel:^12.0 . --no-interaction
 COPY services/${SERVICE}/overlay/ /app/
+ARG SERVICE=gestion-patrimoine-etat
 COPY docker/entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
 EXPOSE 8000
